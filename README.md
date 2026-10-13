@@ -1,65 +1,51 @@
-# 🐾 PawHub
+# 🐾 PawHub — Roblox Lua GUI Hub
 
-**A customizable Roblox Lua GUI project.**
-
-PawHub is a feature-rich client-side Lua project featuring a configurable interface, visual overlays, targeting controls, movement settings, coin collection options, and profile management.
+**PawHub** is a customizable Roblox Lua GUI hub designed to bring multiple tools and settings together in one organized interface. It features visual options, aim-assist settings, coin collection tools, movement controls, configurable keybinds, and configuration management.
 
 ## ✨ Features
 
-- **Custom GUI** — Modern interface with configurable appearance and controls.
-- **Visual Overlays** — ESP boxes, player names, health bars, distance indicators, tracers, skeletons, and radar.
-- **Targeting Options** — Configurable trigger controls, target priorities, and aim-assist settings.
-- **Player Settings** — Adjustable movement speed and jump power.
-- **Coin Collection** — Configurable coin detection, collection speed, and collection delay.
-- **Customization** — Crosshair styles, colors, field of view, and interface settings.
-- **Profiles** — Save, load, import, and export configurations.
-- **Game Profiles** — Associate configurations with individual Roblox experiences.
-- **Configuration Persistence** — JSON-based settings storage where the execution environment supports the required file APIs.
-- **Notifications and Logs** — In-interface feedback and error reporting.
-- **Performance Options** — Configurable visual features and performance settings.
+- 👁️ **Visual Tools** — Customizable visual overlays and display options.
+- 🎯 **Aim Settings** — Adjustable aim-assist options.
+- 🪙 **Coin Collection** — Coin collection and farming features.
+- 🏃 **Movement Options** — Configurable movement-related settings.
+- ⌨️ **Keybinds** — Shortcuts for supported features.
+- ⚙️ **Configuration Management** — Save, load, import, and export settings where supported.
+- 🔔 **Notifications & Logs** — Feedback about actions and feature states.
+- 🎨 **Unified GUI** — Access tools and settings through one interface.
 
-## 🛠️ Technologies
+## 🚀 Installation & Usage
 
-- Lua / Luau
-- Roblox client APIs
-- Roblox UI system
-- TweenService
-- UserInputService
-- HttpService
-- JSON configuration data
-
-## 🚀 Getting Started
-
-1. Download or clone this repository.
+1. Clone or download this repository.
 2. Review the source code before running it.
-3. Check the compatibility requirements of your intended environment.
-4. Test features in a Roblox experience you own or are authorized to test.
-5. Back up your configuration before making changes.
+3. Use the project only in Roblox experiences you own or are authorized to test.
+4. Follow Roblox's Terms of Use and the rules of the experience.
 
-Some features depend on the game, available client APIs, permissions, and execution environment. Not every feature will work universally.
+## 💖 Support My Work
 
-## ⚙️ Configuration
+If you enjoy PawHub and appreciate the work that goes into it, consider supporting me!
 
-PawHub includes configurable options for visual overlays, controls, movement, collection settings, colors, and interface behavior.
+Every donation is appreciated and helps motivate me to improve the project, fix bugs, and develop new features.
 
-Configuration persistence uses the `paw_config.json` filename when the required file APIs are available. Profile and import/export behavior may depend on the environment.
+- ⭐ **Star this repository** to show your support.
+- 🔔 **Follow me on GitHub** for future projects and updates.
+- 💸 **Donate:** [Support me](https://github.com/sponsors/iiidjjjmmo)
 
-## 🔒 Responsible Testing
+*Note: The sponsorship link works only if GitHub Sponsors is enabled for my account.*
 
-Use this project only in experiences you own or have permission to test. Features that affect targeting, visibility, movement, or automated collection may violate the rules of third-party experiences.
+## 👨‍💻 Developer
 
-Never use the project to disrupt other players or compromise accounts.
+Created and maintained by **[@iiidjjjmmo](https://github.com/iiidjjjmmo)**.
 
-## 📌 Project Status
+Explore my repositories for more projects and future updates.
 
-**Version:** `2.0.0`
+## 📌 Version
 
-This project is a work in progress. Compatibility and functionality may vary between Roblox experiences and execution environments.
+**Current version:** `2.0.0`
 
-## 📄 License
+## ⚠️ Disclaimer
 
-No license has been specified yet. Add a license file before redistributing the project under an open-source license.
+PawHub is provided for educational and authorized testing purposes. Use it responsibly and respect the rules of the platforms and experiences you access.
 
 ---
 
-**PawHub — Customize your experience.**
+**Made with ❤️ by [iiidjjjmmo](https://github.com/iiidjjjmmo)** 🐾
