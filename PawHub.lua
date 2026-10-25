@@ -183,7 +183,7 @@ def("triggerPriority", "str", "Closest to mouse", PRIORITIES)
 def("toolFilter", "str", "")
 def("fovRadius", "num", 55, 12, 140)
 def("maxRange", "num", 300, 50, 500)
-def("fireDelayMs", "num", 180, 80, 500)
+def("fireDelayMs", "num", 180, 0, 500)
 def("burstSize", "num", 3, 2, 8)
 
 def("tracerEnabled", "bool", true)
@@ -213,8 +213,8 @@ def("protectTeam", "bool", false)
 def("protectGroup", "bool", false)
 def("protectGroupId", "num", 0, 0, 999999999)
 def("protectGroupRank", "num", 1, 1, 255)
-def("blacklist", "map")
-def("priority", "map")
+def("blacklist", "map", nil, nil, nil, "g")
+def("priority", "map", nil, nil, nil, "g")
 
 def("espEnabled", "bool", true)
 def("espBoxStyle", "str", "Box", { "Box", "Corners", "Filled" })
@@ -282,6 +282,12 @@ def("coinFarm", "bool", false, nil, nil, "r")
 def("farmSpeed", "num", 30, 10, 120)
 def("farmDelayMs", "num", 300, 50, 2000)
 def("farmNames", "str", "coin,money,gem,gold,cash,collect,loot")
+def("farmGoal", "num", 40, 1, 100)
+def("farmAvoidKiller", "bool", true)
+def("farmSafeDistance", "num", 70, 20, 200)
+def("farmAvoidSight", "bool", true)
+def("farmAvoidPlayers", "bool", false)
+def("farmResetDone", "bool", true)
 
 def("hudModules", "bool", false, nil, nil, "g")
 def("hudFps", "bool", false, nil, nil, "g")
@@ -298,6 +304,9 @@ def("mm2MurdererColor", "color", palette[7], nil, false)
 def("mm2SheriffColor", "color", palette[2], nil, false)
 def("mm2InnocentColor", "color", palette[4], nil, false)
 def("mm2GunColor", "color", palette[8], nil, false)
+def("mm2TriggerMurderer", "bool", false)
+def("mm2AssistMurderer", "bool", false)
+def("mm2SilentMurderer", "bool", false)
 
 def("bindPanel", "str", "RightShift", nil, nil, "g")
 def("bindTrigger", "str", "LeftAlt", nil, nil, "g")
@@ -306,14 +315,14 @@ def("bindEsp", "str", "None", nil, nil, "g")
 def("bindHold", "str", "Q", nil, nil, "g")
 def("bindSwitch", "str", "T", nil, nil, "g")
 
-local S = {}
+local S: { [string]: any } = {}
 
 for _, key in ipairs(DEF_ORDER) do
 	local d = DEF[key]
 	S[key] = d.kind == "map" and {} or d.default
 end
 
-local function encodeValue(d, value)
+local function encodeValue(d: any, value: any): any
 	if d.kind == "color" then
 		if not value then
 			return nil
@@ -337,7 +346,7 @@ local function encodeValue(d, value)
 	return value
 end
 
-local function decodeValue(d, raw)
+local function decodeValue(d: any, raw: any): any
 	local kind = d.kind
 
 	if kind == "bool" then
@@ -346,7 +355,7 @@ local function decodeValue(d, raw)
 		end
 	elseif kind == "num" then
 		if type(raw) == "number" then
-			return math.floor(math.clamp(raw, d.a, d.b) + 0.5)
+			return math.floor(math.clamp(raw, d.a :: number, d.b :: number) + 0.5)
 		end
 	elseif kind == "str" then
 		if type(raw) == "string" and (not d.a or table.find(d.a, raw)) then
@@ -459,7 +468,7 @@ function Config.save()
 		return
 	end
 
-	pcall(function()
+	local ok, err = pcall(function()
 		writefile(CONFIG_FILE, HttpService:JSONEncode({
 			version = VERSION,
 			settings = Config.collect(true),
@@ -470,6 +479,10 @@ function Config.save()
 			appHome = meta.appHome,
 		}))
 	end)
+
+	if not ok then
+		Log.add("Config", err)
+	end
 end
 
 local function queueSave()
@@ -612,7 +625,16 @@ local State = {
 	mm2Loaded = false,
 }
 
+local Roles = { murderer = nil, sheriff = nil }
+
+local function mm2Active()
+	return State.mm2Loaded == true
+end
+
 local TIPS = {
+	["Trigger Murderer Only"] = "The auto trigger only shoots the murderer. Needs the MM2 features loaded.",
+	["Silent Murderer Only"] = "Silent aim only redirects shots to the murderer. Needs the MM2 features loaded.",
+	["Assist Murderer Only"] = "The aim assist only pulls toward the murderer. Needs the MM2 features loaded.",
 	["Auto Trigger"] = "Fires your equipped tool when your cursor is on a valid target.",
 	["Players"] = "Allow players as targets.",
 	["NPCs"] = "Allow NPC models with a Humanoid as targets.",
@@ -676,6 +698,12 @@ local TIPS = {
 	["Prediction"] = "Leads moving targets.",
 	["Sticky Target"] = "Keeps the current target until it leaves a slightly larger FOV.",
 	["Aim Part"] = "Head, Torso, Closest to your cursor, or Random.",
+	["Coin Goal"] = "Stops farming after this many coins, then waits for the next round.",
+	["Avoid Murderer"] = "Skips coins near the murderer and flies away if the murderer gets close.",
+	["Safe Distance"] = "How far you try to stay from the murderer in studs.",
+	["Avoid Line Of Sight"] = "Skips coins the murderer could see from where they stand.",
+	["Avoid All Players"] = "Also skips coins that have any other player close to them.",
+	["Reset When Done"] = "Resets your character once after reaching the goal, then waits for the next round.",
 	["Auto Farm Coins"] = "Flies to the nearest coin and collects it. Walks through walls while it runs.",
 	["Fly Speed"] = "How fast you fly between coins in studs per second.",
 	["Collect Delay"] = "Pause after each coin in milliseconds.",
@@ -918,6 +946,10 @@ end
 function Targets.protected(other)
 	local id = other.UserId
 
+	if friendCache[id] == nil then
+		Targets.checkFriend(other)
+	end
+
 	if S.blacklist[id] then
 		return true
 	end
@@ -970,7 +1002,15 @@ function Targets.fromHit(hit)
 						return nil
 					end
 
+					if S.mm2TriggerMurderer and State.mm2Loaded and owner ~= Roles.murderer then
+						return nil
+					end
+
 					return current
+				end
+
+				if S.mm2TriggerMurderer and State.mm2Loaded then
+					return nil
 				end
 
 				return S.npcsEnabled and current or nil
@@ -1010,6 +1050,69 @@ function Targets.ensureNpcTracking()
 			Targets.npcModels[instance.Parent] = nil
 		end
 	end)
+end
+
+function Targets.eligible(model, owner, teamKey, murderKey)
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+
+	if not humanoid or humanoid.Health <= 0 then
+		return nil
+	end
+
+	if S.ignoreForcefield and model:FindFirstChildOfClass("ForceField") then
+		return nil
+	end
+
+	local murderOnly = murderKey ~= nil and S[murderKey] and State.mm2Loaded
+
+	if owner then
+		if not S.playersEnabled or Targets.protected(owner) then
+			return nil
+		end
+
+		if teamKey and S[teamKey] and owner.Team ~= nil and owner.Team == player.Team then
+			return nil
+		end
+
+		if murderOnly and owner ~= Roles.murderer then
+			return nil
+		end
+	elseif not S.npcsEnabled or murderOnly then
+		return nil
+	end
+
+	return humanoid
+end
+
+function Targets.collect(models, owners)
+	table.clear(models)
+	table.clear(owners)
+
+	local count = 0
+
+	for _, other in ipairs(Players:GetPlayers()) do
+		if other ~= player and other.Character then
+			count += 1
+			models[count] = other.Character
+			owners[count] = other
+		end
+	end
+
+	if S.npcsEnabled then
+		Targets.ensureNpcTracking()
+
+		for model in pairs(Targets.npcModels) do
+			if Players:GetPlayerFromCharacter(model) or not model:IsDescendantOf(workspace) then
+				Targets.npcModels[model] = nil
+			elseif model ~= player.Character then
+				count += 1
+				models[count] = model
+				owners[count] = false
+			end
+		end
+	end
+
+	return count
 end
 
 local Bones = {}
@@ -1096,6 +1199,97 @@ function Bones.clear(lines)
 	end
 
 	table.clear(lines)
+end
+
+local Aim = {
+	HEAD = { "Head" },
+	TORSO = { "HumanoidRootPart", "UpperTorso", "Torso" },
+	BODY = {
+		"Head",
+		"UpperTorso",
+		"Torso",
+		"LowerTorso",
+		"HumanoidRootPart",
+		"LeftUpperArm",
+		"RightUpperArm",
+		"Left Arm",
+		"Right Arm",
+		"LeftUpperLeg",
+		"RightUpperLeg",
+		"Left Leg",
+		"Right Leg",
+	},
+}
+
+function Aim.firstPart(model, names)
+	for _, name in ipairs(names) do
+		local part = model:FindFirstChild(name)
+
+		if part and part:IsA("BasePart") then
+			return part
+		end
+	end
+
+	return nil
+end
+
+function Aim.closestPart(model, camera, mouse)
+	local best
+	local bestDistance
+
+	for _, name in ipairs(Aim.BODY) do
+		local part = model:FindFirstChild(name)
+
+		if part and part:IsA("BasePart") then
+			local point = camera:WorldToViewportPoint(part.Position)
+
+			if point.Z > 0 then
+				local distance = (Vector2.new(point.X, point.Y) - mouse).Magnitude
+
+				if not bestDistance or distance < bestDistance then
+					best = part
+					bestDistance = distance
+				end
+			end
+		end
+	end
+
+	return best
+end
+
+function Aim.part(model, mode, camera, mouse)
+	if mode == "Head" then
+		return Aim.firstPart(model, Aim.HEAD) or Aim.firstPart(model, Aim.TORSO)
+	elseif mode == "Torso" then
+		return Aim.firstPart(model, Aim.TORSO)
+	end
+
+	return Aim.closestPart(model, camera, mouse)
+end
+
+function Aim.randomPart(model, store, now)
+	local pick = store[model]
+
+	if not pick or now - pick.time > 0.6 or not pick.part.Parent then
+		local available = {}
+
+		for _, name in ipairs(Aim.BODY) do
+			local part = model:FindFirstChild(name)
+
+			if part and part:IsA("BasePart") then
+				table.insert(available, part)
+			end
+		end
+
+		if #available == 0 then
+			return nil
+		end
+
+		pick = { part = available[math.random(1, #available)], time = now }
+		store[model] = pick
+	end
+
+	return pick.part
 end
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
@@ -1332,10 +1526,19 @@ do
 		end
 	end
 
+	local aimModel
+	local aimCached
+
 	local function updateTracer(dt, mouse)
 		local camera = workspace.CurrentCamera
 		local target = State.currentTarget
-		local aimPart = target and getAimPart(target)
+
+		if target ~= aimModel or (aimCached and not aimCached.Parent) then
+			aimModel = target
+			aimCached = target and getAimPart(target) or nil
+		end
+
+		local aimPart = aimCached
 		local desired
 
 		if camera and aimPart and aimPart:IsA("BasePart") and aimPart:IsDescendantOf(workspace) then
@@ -1540,7 +1743,7 @@ do
 		table.clear(samples)
 
 		local radius = S.fovRadius
-		local step = math.clamp(math.floor(radius / 4), 6, 14)
+		local step = math.max(6, math.ceil(radius * 0.145))
 
 		for y = -radius, radius, step do
 			for x = -radius, radius, step do
@@ -1550,8 +1753,6 @@ do
 			end
 		end
 
-		table.insert(samples, Vector2.zero)
-
 		table.sort(samples, function(a, b)
 			return a.X * a.X + a.Y * a.Y < b.X * b.X + b.Y * b.Y
 		end)
@@ -1559,7 +1760,7 @@ do
 
 	Trigger.rebuild()
 
-	function Trigger.scan()
+	function Trigger.castCenter()
 		local character = player.Character
 		local camera = workspace.CurrentCamera
 
@@ -1570,11 +1771,37 @@ do
 		rayParams.FilterDescendantsInstances = { character }
 
 		local mouse = UserInputService:GetMouseLocation()
+		local ray = camera:ViewportPointToRay(mouse.X, mouse.Y)
+		local result = workspace:Raycast(ray.Origin, ray.Direction * S.maxRange, rayParams)
+
+		if not result then
+			return nil, nil
+		end
+
+		local target = Targets.fromHit(result.Instance)
+
+		if not target then
+			return nil, nil
+		end
+
+		return target, result.Instance
+	end
+
+	function Trigger.scan()
+		local character = player.Character
+		local camera = workspace.CurrentCamera
+
+		if not character or not camera then
+			return nil
+		end
+
+		rayParams.FilterDescendantsInstances = { character }
+
+		local mouse = UserInputService:GetMouseLocation()
 		local origin = camera.CFrame.Position
 		local earlyExit = S.triggerPriority == "Closest to mouse" and next(S.priority) == nil
 		local found = {}
 		local seen = {}
-		local center
 
 		for index, offset in ipairs(samples) do
 			local ray = camera:ViewportPointToRay(mouse.X + offset.X, mouse.Y + offset.Y)
@@ -1583,29 +1810,23 @@ do
 			if result then
 				local target = Targets.fromHit(result.Instance)
 
-				if target then
-					if offset.X == 0 and offset.Y == 0 and not center then
-						center = { model = target, part = result.Instance }
-					end
+				if target and not seen[target] then
+					seen[target] = true
+					table.insert(found, {
+						model = target,
+						order = index,
+						distance = (result.Position - origin).Magnitude,
+					})
 
-					if not seen[target] then
-						seen[target] = true
-						table.insert(found, {
-							model = target,
-							order = index,
-							distance = (result.Position - origin).Magnitude,
-						})
-
-						if earlyExit then
-							break
-						end
+					if earlyExit then
+						break
 					end
 				end
 			end
 		end
 
 		if #found == 0 then
-			return nil, center
+			return nil
 		end
 
 		local metric = "order"
@@ -1632,7 +1853,7 @@ do
 			end
 		end
 
-		return best, center
+		return best
 	end
 
 	local function toolAllowed(tool)
@@ -1704,46 +1925,35 @@ do
 	end
 
 	function Trigger.tick(dt)
+		if not S.autoEnabled or State.panelHover then
+			State.currentTarget = nil
+			State.locked = false
+			return
+		end
+
 		scanTimer += dt
 
-		if scanTimer < (S.perfMode and 0.05 or 0.016) then
-			return
+		if scanTimer >= (S.perfMode and 0.1 or 1 / 30) then
+			scanTimer = 0
+
+			local best = Trigger.scan()
+			State.currentTarget = best and best.model or nil
+			State.locked = best ~= nil
 		end
 
-		scanTimer = 0
+		local model, part = Trigger.castCenter()
 
-		if not S.autoEnabled then
-			State.currentTarget = nil
-			State.locked = false
-			return
-		end
-
-		local best
-		local center
-
-		if not State.panelHover then
-			best, center = Trigger.scan()
-		end
-
-		if best then
-			State.currentTarget = best.model
-			State.locked = true
-		else
-			State.currentTarget = nil
-			State.locked = false
-		end
-
-		local now = os.clock()
-
-		if not center then
+		if not model then
 			semiLatch = false
 			burstShots = 0
 			return
 		end
 
-		if not modeActive() or not partAllowed(center.part) then
+		if not modeActive() or not partAllowed(part) then
 			return
 		end
+
+		local now = os.clock()
 
 		if now - lastShot < S.fireDelayMs / 1000 or now < burstResume then
 			return
@@ -1756,7 +1966,7 @@ do
 		if fireTool() then
 			lastShot = now
 			State.lastFire = now
-			State.lastFireModel = center.model
+			State.lastFireModel = model
 			semiLatch = true
 
 			if S.fireMode == "Burst" then
@@ -1773,23 +1983,6 @@ end
 local Assist = {}
 
 do
-	local TORSO = { "HumanoidRootPart", "UpperTorso", "Torso" }
-	local BODY = {
-		"Head",
-		"UpperTorso",
-		"Torso",
-		"LowerTorso",
-		"HumanoidRootPart",
-		"LeftUpperArm",
-		"RightUpperArm",
-		"Left Arm",
-		"Right Arm",
-		"LeftUpperLeg",
-		"RightUpperLeg",
-		"Left Leg",
-		"Right Leg",
-	}
-
 	local residual = Vector2.zero
 	local ringAlpha = 0
 	local ringRadius = S.assistFov
@@ -1797,6 +1990,8 @@ do
 	local lastModel
 	local lockStart = 0
 	local switchSkip = 0
+	local models = {}
+	local owners = {}
 
 	local ring = new("Frame", {
 		Name = "AssistFOV",
@@ -1814,72 +2009,12 @@ do
 		switchSkip += 1
 	end
 
-	local function firstPart(model, names)
-		for _, name in ipairs(names) do
-			local part = model:FindFirstChild(name)
-
-			if part and part:IsA("BasePart") then
-				return part
-			end
-		end
-
-		return nil
-	end
-
-	local function choosePart(model, camera, mouse)
-		if S.assistPart == "Head" then
-			return firstPart(model, { "Head" }) or firstPart(model, TORSO)
-		elseif S.assistPart == "Torso" then
-			return firstPart(model, TORSO)
-		end
-
-		local best
-		local bestDistance
-
-		for _, name in ipairs(BODY) do
-			local part = model:FindFirstChild(name)
-
-			if part and part:IsA("BasePart") then
-				local point = camera:WorldToViewportPoint(part.Position)
-
-				if point.Z > 0 then
-					local distance = (Vector2.new(point.X, point.Y) - mouse).Magnitude
-
-					if not bestDistance or distance < bestDistance then
-						best = part
-						bestDistance = distance
-					end
-				end
-			end
-		end
-
-		return best
-	end
-
 	local function evaluate(model, owner, camera, mouse, origin)
-		local humanoid = model:FindFirstChildOfClass("Humanoid")
-
-		if not humanoid or humanoid.Health <= 0 then
+		if not Targets.eligible(model, owner, "assistTeam", "mm2AssistMurderer") then
 			return nil
 		end
 
-		if S.ignoreForcefield and model:FindFirstChildOfClass("ForceField") then
-			return nil
-		end
-
-		if owner then
-			if not S.playersEnabled or Targets.protected(owner) then
-				return nil
-			end
-
-			if S.assistTeam and owner.Team ~= nil and owner.Team == player.Team then
-				return nil
-			end
-		elseif not S.npcsEnabled then
-			return nil
-		end
-
-		local part = choosePart(model, camera, mouse)
+		local part = Aim.part(model, S.assistPart, camera, mouse)
 
 		if not part then
 			return nil
@@ -1909,7 +2044,8 @@ do
 			limit = limit * (1 - 0.5 * math.clamp(distance / S.assistRange, 0, 1))
 		end
 
-		local offset = (Vector2.new(point.X, point.Y) - mouse).Magnitude
+		local screen = Vector2.new(point.X, point.Y)
+		local offset = (screen - mouse).Magnitude
 
 		if offset > limit then
 			return nil
@@ -1926,16 +2062,17 @@ do
 			end
 		end
 
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+
 		return {
 			model = model,
-			part = part,
 			aim = aim,
-			screen = Vector2.new(point.X, point.Y),
+			screen = screen,
 			offset = offset,
 			distance = distance,
-			health = humanoid.Health,
+			health = humanoid and humanoid.Health or math.huge,
 			limit = limit,
-			priority = Targets.isPriority(owner),
+			priority = Targets.isPriority(owner or nil),
 		}
 	end
 
@@ -1953,6 +2090,83 @@ do
 		return isDown(S.bindHold)
 	end
 
+	local function pickBest(list, now)
+		local metric = "offset"
+
+		if S.assistPriority == "Closest distance" then
+			metric = "distance"
+		elseif S.assistPriority == "Lowest health" then
+			metric = "health"
+		end
+
+		table.sort(list, function(a, b)
+			if a.priority ~= b.priority then
+				return a.priority
+			end
+
+			return a[metric] < b[metric]
+		end)
+
+		local best = list[1]
+
+		if switchSkip > 0 then
+			best = list[(switchSkip % #list) + 1]
+		end
+
+		if S.assistStickyMs > 0 and lastModel and now - lockStart < S.assistStickyMs / 1000 then
+			for _, entry in ipairs(list) do
+				if entry.model == lastModel then
+					return entry
+				end
+			end
+		end
+
+		return best
+	end
+
+	local function falloffFor(t)
+		if S.assistCurve == "Ease Out" then
+			return 1 - 0.6 * t * t
+		elseif S.assistCurve == "Ease In" then
+			return 0.4 + 0.6 * (1 - t) * (1 - t)
+		end
+
+		return 1 - 0.6 * t
+	end
+
+	local function pull(best, camera, mouse, dt)
+		local delta = best.screen - mouse
+		local distance = delta.Magnitude
+
+		if distance <= S.assistDeadzone then
+			return
+		end
+
+		local boost = S.assistOverdrive / 100
+		local t = math.clamp(distance / math.max(best.limit, 1), 0, 1)
+		local rate = (S.assistStrength / 100) * 10 * falloffFor(t) + boost * 45
+		local alpha = 1 - math.exp(-rate * dt)
+		local move = delta * alpha
+		local cap = (30 + boost * 120) * math.max(dt * 60, 1)
+
+		if move.Magnitude > cap then
+			move = move.Unit * cap
+		end
+
+		if type(mousemoverel) == "function" then
+			local total = residual + move
+			local whole = Vector2.new(math.round(total.X), math.round(total.Y))
+			residual = total - whole
+
+			if whole.X ~= 0 or whole.Y ~= 0 then
+				mousemoverel(whole.X, whole.Y)
+			end
+		else
+			local blend = math.clamp(alpha * 0.5, 0, 1)
+			camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position, best.aim), blend)
+		end
+	end
+
 	function Assist.update(dt, mouse)
 		local camera = workspace.CurrentCamera
 		local active = S.assistEnabled and camera ~= nil and not State.panelHover
@@ -1962,66 +2176,18 @@ do
 		if active then
 			local origin = camera.CFrame.Position
 			local list = {}
+			local count = Targets.collect(models, owners)
 
-			if S.npcsEnabled and not Targets.npcTracking then
-				Targets.ensureNpcTracking()
-			end
+			for index = 1, count do
+				local data = evaluate(models[index], owners[index] or nil, camera, mouse, origin)
 
-			for _, other in ipairs(Players:GetPlayers()) do
-				if other ~= player and other.Character then
-					local data = evaluate(other.Character, other, camera, mouse, origin)
-
-					if data then
-						table.insert(list, data)
-					end
-				end
-			end
-
-			if S.npcsEnabled then
-				for model in pairs(Targets.npcModels) do
-					if model ~= player.Character
-						and not Players:GetPlayerFromCharacter(model)
-						and model:IsDescendantOf(workspace) then
-						local data = evaluate(model, nil, camera, mouse, origin)
-
-						if data then
-							table.insert(list, data)
-						end
-					end
+				if data then
+					table.insert(list, data)
 				end
 			end
 
 			if #list > 0 then
-				local metric = "offset"
-
-				if S.assistPriority == "Closest distance" then
-					metric = "distance"
-				elseif S.assistPriority == "Lowest health" then
-					metric = "health"
-				end
-
-				table.sort(list, function(a, b)
-					if a.priority ~= b.priority then
-						return a.priority
-					end
-
-					return a[metric] < b[metric]
-				end)
-
-				best = list[1]
-
-				if switchSkip > 0 then
-					best = list[(switchSkip % #list) + 1]
-				end
-
-				if S.assistStickyMs > 0 and lastModel and now - lockStart < S.assistStickyMs / 1000 then
-					for _, entry in ipairs(list) do
-						if entry.model == lastModel then
-							best = entry
-							break
-						end
-					end
-				end
+				best = pickBest(list, now)
 			else
 				switchSkip = 0
 			end
@@ -2039,44 +2205,7 @@ do
 		State.assistLocked = best ~= nil
 
 		if best and modeActive() then
-			local delta = best.screen - mouse
-			local distance = delta.Magnitude
-
-			if distance > S.assistDeadzone then
-				local t = math.clamp(distance / math.max(best.limit, 1), 0, 1)
-				local falloff
-
-				if S.assistCurve == "Ease Out" then
-					falloff = 1 - 0.6 * t * t
-				elseif S.assistCurve == "Ease In" then
-					falloff = 0.4 + 0.6 * (1 - t) * (1 - t)
-				else
-					falloff = 1 - 0.6 * t
-				end
-
-				local boost = S.assistOverdrive / 100
-				local rate = (S.assistStrength / 100) * 10 * falloff + boost * 45
-				local alpha = 1 - math.exp(-rate * dt)
-				local move = delta * alpha
-				local cap = (30 + boost * 120) * math.max(dt * 60, 1)
-
-				if move.Magnitude > cap then
-					move = move.Unit * cap
-				end
-
-				if type(mousemoverel) == "function" then
-					local total = residual + move
-					local whole = Vector2.new(math.round(total.X), math.round(total.Y))
-					residual = total - whole
-
-					if whole.X ~= 0 or whole.Y ~= 0 then
-						mousemoverel(whole.X, whole.Y)
-					end
-				else
-					local blend = math.clamp(alpha * 0.5, 0, 1)
-					camera.CFrame = camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position, best.aim), blend)
-				end
-			end
+			pull(best, camera, mouse, dt)
 		else
 			residual = Vector2.zero
 		end
@@ -2103,17 +2232,12 @@ do
 		end
 	end
 end
-local function mm2Active()
-	return State.mm2Loaded == true
-end
-
-local Roles = { murderer = nil, sheriff = nil }
-
 local ESP = {}
 
 do
 	local entries = {}
 	local frameCount = 0
+	local dormant = false
 	local footNames = { "LeftFoot", "RightFoot", "Left Leg", "Right Leg" }
 
 	function ESP.colorFor(owner)
@@ -2313,6 +2437,14 @@ do
 		entries[model] = nil
 	end
 
+	local function placeCorner(piece, x, y, width, height, color, transparency)
+		piece.Position = UDim2.fromOffset(x, y)
+		piece.Size = UDim2.fromOffset(width, height)
+		piece.BackgroundColor3 = color
+		piece.BackgroundTransparency = transparency
+		piece.Visible = true
+	end
+
 	local function drawArrow(e, camera, root, viewport, color, transparency)
 		local relative = camera.CFrame:PointToObjectSpace(root.Position)
 		local angle = math.atan2(relative.X, -relative.Z)
@@ -2427,25 +2559,16 @@ do
 
 		if S.espBoxes and style == "Corners" then
 			local length = math.clamp(math.min(width, height) * 0.25, 6, 20)
-			local specs = {
-				{ minX, minY, length, 2 },
-				{ minX, minY, 2, length },
-				{ maxX - length, minY, length, 2 },
-				{ maxX - 2, minY, 2, length },
-				{ minX, maxY - 2, length, 2 },
-				{ minX, maxY - length, 2, length },
-				{ maxX - length, maxY - 2, length, 2 },
-				{ maxX - 2, maxY - length, 2, length },
-			}
+			local pieces = e.corners
 
-			for index, spec in ipairs(specs) do
-				local piece = e.corners[index]
-				piece.Position = UDim2.fromOffset(spec[1], spec[2])
-				piece.Size = UDim2.fromOffset(spec[3], spec[4])
-				piece.BackgroundColor3 = color
-				piece.BackgroundTransparency = transparency
-				piece.Visible = true
-			end
+			placeCorner(pieces[1], minX, minY, length, 2, color, transparency)
+			placeCorner(pieces[2], minX, minY, 2, length, color, transparency)
+			placeCorner(pieces[3], maxX - length, minY, length, 2, color, transparency)
+			placeCorner(pieces[4], maxX - 2, minY, 2, length, color, transparency)
+			placeCorner(pieces[5], minX, maxY - 2, length, 2, color, transparency)
+			placeCorner(pieces[6], minX, maxY - length, 2, length, color, transparency)
+			placeCorner(pieces[7], maxX - length, maxY - 2, length, 2, color, transparency)
+			placeCorner(pieces[8], maxX - 2, maxY - length, 2, length, color, transparency)
 		else
 			for _, piece in ipairs(e.corners) do
 				piece.Visible = false
@@ -2598,13 +2721,19 @@ do
 		local camera = workspace.CurrentCamera
 
 		if not S.espEnabled or not camera then
-			for _, e in pairs(entries) do
-				hide(e)
-				clearChams(e)
+			if not dormant then
+				dormant = true
+
+				for _, e in pairs(entries) do
+					hide(e)
+					clearChams(e)
+				end
 			end
 
 			return
 		end
+
+		dormant = false
 
 		if S.perfMode and frameCount % 2 == 0 then
 			return
@@ -2889,6 +3018,7 @@ local Util = {}
 do
 	local normalSpeed = 16
 	local normalJump = 50
+	local originalUseJumpPower
 	local originalFov
 	local fullbrightSaved
 	local afkConnection
@@ -2921,14 +3051,23 @@ do
 			return
 		end
 
-		humanoid.UseJumpPower = true
-
 		if on then
+			if originalUseJumpPower == nil then
+				originalUseJumpPower = humanoid.UseJumpPower
+			end
+
+			humanoid.UseJumpPower = true
+
 			if humanoid.JumpPower ~= S.jumpPower then
 				normalJump = humanoid.JumpPower
 			end
 		else
 			humanoid.JumpPower = normalJump
+
+			if originalUseJumpPower ~= nil then
+				humanoid.UseJumpPower = originalUseJumpPower
+				originalUseJumpPower = nil
+			end
 		end
 	end
 
@@ -3029,6 +3168,10 @@ do
 
 			if S.jumpOn then
 				humanoid.JumpPower = normalJump
+
+				if originalUseJumpPower ~= nil then
+					humanoid.UseJumpPower = originalUseJumpPower
+				end
 			end
 		end
 
@@ -3055,13 +3198,40 @@ do
 	end
 end
 
-local Farm = {}
+local Farm = { onStatus = nil }
 
 do
 	local cache = {}
-	local lastScan = 0
-	local currentTween
+	local collected = setmetatable({}, { __mode = "k" })
+	local attempts = setmetatable({}, { __mode = "k" })
 	local modified = {}
+	local knownCoins = {}
+	local tokens = {}
+	local lastScan = 0
+	local lastHop = 0
+	local currentTween
+	local state = "off"
+	local roundCoins = 0
+	local resetDone = false
+	local emptySince
+	local sawNoKiller = false
+	local killerCache
+	local killerTime = 0
+	local lastStatus = ""
+
+	local sightParams = RaycastParams.new()
+	sightParams.FilterType = Enum.RaycastFilterType.Exclude
+	sightParams.IgnoreWater = true
+
+	local function setStatus(text)
+		if text ~= lastStatus then
+			lastStatus = text
+
+			if Farm.onStatus then
+				Farm.onStatus(text)
+			end
+		end
+	end
 
 	local function getRoot()
 		local character = player.Character
@@ -3104,7 +3274,7 @@ do
 	end
 
 	local function parseNames()
-		local tokens = {}
+		table.clear(tokens)
 
 		for token in string.gmatch(S.farmNames:lower(), "[^,]+") do
 			token = token:match("^%s*(.-)%s*$")
@@ -3113,12 +3283,41 @@ do
 				table.insert(tokens, token)
 			end
 		end
+	end
 
-		return tokens
+	local function matchesCoin(name)
+		name = name:lower()
+
+		for _, token in ipairs(tokens) do
+			if name:find(token, 1, true) then
+				return true
+			end
+		end
+
+		return false
+	end
+
+	local containerCache
+	local containerCheckedAt = -10
+
+	local function searchRoot()
+		if containerCache and containerCache.Parent then
+			return containerCache
+		end
+
+		local now = os.clock()
+
+		if now - containerCheckedAt > 10 then
+			containerCheckedAt = now
+			containerCache = workspace:FindFirstChild("CoinContainer", true)
+		end
+
+		return containerCache or workspace
 	end
 
 	local function findCoins()
-		local tokens = parseNames()
+		parseNames()
+
 		local coins = {}
 
 		if #tokens == 0 then
@@ -3127,23 +3326,18 @@ do
 
 		local character = player.Character
 
-		for _, object in ipairs(workspace:GetDescendants()) do
+		for _, object in ipairs(searchRoot():GetDescendants()) do
 			if object:IsA("BasePart")
 				and not object:IsA("Terrain")
 				and not object.CanCollide
-				and not (character and object:IsDescendantOf(character)) then
-				local name = object.Name:lower()
+				and object.CanTouch
+				and object.Transparency < 0.95
+				and not (character and object:IsDescendantOf(character))
+				and matchesCoin(object.Name) then
+				local model = object:FindFirstAncestorOfClass("Model")
 
-				for _, token in ipairs(tokens) do
-					if name:find(token, 1, true) then
-						local model = object:FindFirstAncestorOfClass("Model")
-
-						if not (model and model:FindFirstChildOfClass("Humanoid")) then
-							table.insert(coins, object)
-						end
-
-						break
-					end
+				if not (model and model:FindFirstChildOfClass("Humanoid")) then
+					table.insert(coins, object)
 				end
 			end
 		end
@@ -3151,15 +3345,139 @@ do
 		return coins
 	end
 
+	local function hasKnife(other)
+		local backpack = other:FindFirstChildOfClass("Backpack")
+
+		if backpack and backpack:FindFirstChild("Knife") then
+			return true
+		end
+
+		local character = other.Character
+		return character ~= nil and character:FindFirstChild("Knife") ~= nil
+	end
+
+	local function getKiller()
+		local now = os.clock()
+
+		if now - killerTime > 0.4 then
+			killerTime = now
+			killerCache = nil
+
+			if State.mm2Loaded and Roles.murderer and Roles.murderer ~= player then
+				killerCache = Roles.murderer
+			else
+				for _, other in ipairs(Players:GetPlayers()) do
+					if other ~= player and hasKnife(other) then
+						killerCache = other
+						break
+					end
+				end
+			end
+		end
+
+		local killer = killerCache
+		local character = killer and killer.Character
+		local root = character and character:FindFirstChild("HumanoidRootPart")
+
+		return killer, root and root.Position or nil
+	end
+
+	local function segmentDistance(a, b, point)
+		local ab = b - a
+		local lengthSquared = ab:Dot(ab)
+
+		if lengthSquared < 0.001 then
+			return (point - a).Magnitude
+		end
+
+		local t = math.clamp((point - a):Dot(ab) / lengthSquared, 0, 1)
+		return (point - (a + ab * t)).Magnitude
+	end
+
+	local function hasSight(from, coin)
+		local result = workspace:Raycast(from, coin.Position - from, sightParams)
+
+		if not result then
+			return true
+		end
+
+		return result.Instance == coin or matchesCoin(result.Instance.Name)
+	end
+
+	local function coinSafe(coin, from, killerPos, positions)
+		local safeDistance = S.farmSafeDistance
+
+		if S.farmAvoidKiller and killerPos then
+			local distance = (coin.Position - killerPos).Magnitude
+
+			if distance < safeDistance then
+				return false
+			end
+
+			if segmentDistance(from, coin.Position, killerPos) < safeDistance * 0.5 then
+				return false
+			end
+
+			if S.farmAvoidSight and distance < safeDistance * 2.5 and hasSight(killerPos, coin) then
+				return false
+			end
+		end
+
+		if S.farmAvoidPlayers then
+			for _, position in ipairs(positions) do
+				if (coin.Position - position).Magnitude < safeDistance * 0.6 then
+					return false
+				end
+			end
+		end
+
+		return true
+	end
+
+	local function otherPositions()
+		local positions = {}
+
+		if not S.farmAvoidPlayers then
+			return positions
+		end
+
+		for _, other in ipairs(Players:GetPlayers()) do
+			local character = other ~= player and other.Character
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+
+			if root then
+				table.insert(positions, root.Position)
+			end
+		end
+
+		return positions
+	end
+
+	local function containerPosition()
+		local container = containerCache and containerCache.Parent and containerCache
+			or workspace:FindFirstChild("CoinContainer", true)
+
+		if not container then
+			return nil
+		end
+
+		if container:IsA("Model") then
+			return container:GetPivot().Position
+		end
+
+		local part = container:FindFirstChildWhichIsA("BasePart", true)
+		return part and part.Position or nil
+	end
+
 	local function collect(coin)
 		if not coin or not coin.Parent then
-			return false
+			return
 		end
 
 		local root = getRoot()
 
 		if not root then
-			return false
+			return
 		end
 
 		root.CFrame = CFrame.new(coin.Position + Vector3.new(0, 2, 0))
@@ -3183,8 +3501,18 @@ do
 			fireproximityprompt(prompt)
 		end
 
-		task.wait(0.1)
-		return not coin.Parent
+		task.wait(0.15)
+
+		if not coin.Parent or coin.Transparency >= 0.95 or not coin.CanTouch then
+			roundCoins += 1
+			collected[coin] = true
+		else
+			attempts[coin] = (attempts[coin] or 0) + 1
+
+			if attempts[coin] >= 2 then
+				collected[coin] = true
+			end
+		end
 	end
 
 	local function moveTo(target)
@@ -3221,12 +3549,21 @@ do
 		local started = os.clock()
 
 		while not finished do
-			if not root.Parent or not S.coinFarm then
+			if not root.Parent or not S.coinFarm or state ~= "farming" then
 				cancelTween()
 				return false
 			end
 
 			noclip(true)
+
+			if S.farmAvoidKiller then
+				local _, killerPos = getKiller()
+
+				if killerPos and (root.Position - killerPos).Magnitude < S.farmSafeDistance * 0.4 then
+					cancelTween()
+					return false
+				end
+			end
 
 			if os.clock() - started > 5 then
 				cancelTween()
@@ -3240,7 +3577,202 @@ do
 		return true
 	end
 
+	local function startRound()
+		state = "farming"
+		roundCoins = 0
+		resetDone = false
+		emptySince = nil
+		sawNoKiller = false
+		lastScan = 0
+		table.clear(cache)
+		table.clear(collected)
+		table.clear(attempts)
+	end
+
+	local function finishRound()
+		state = "waiting"
+		cancelTween()
+		noclip(false)
+
+		table.clear(knownCoins)
+
+		for _, coin in ipairs(findCoins()) do
+			knownCoins[coin] = true
+		end
+
+		sawNoKiller = false
+
+		if S.farmResetDone and not resetDone then
+			resetDone = true
+
+			local character = player.Character
+			local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+
+			if humanoid then
+				humanoid.Health = 0
+			end
+		end
+
+		Toast.show("Collected " .. roundCoins .. " coins")
+	end
+
+	local function stepWaiting()
+		setStatus("Done - waiting for the next round")
+
+		local killer = select(1, getKiller())
+
+		if killer == nil then
+			sawNoKiller = true
+		end
+
+		local fresh = 0
+
+		for _, coin in ipairs(findCoins()) do
+			if not knownCoins[coin] then
+				fresh += 1
+			end
+		end
+
+		if fresh >= 5 or (sawNoKiller and killer ~= nil) then
+			startRound()
+			setStatus("New round - farming")
+			return 3
+		end
+
+		return 1.5
+	end
+
+	local function stepFarming(root)
+		noclip(true)
+		root.AssemblyLinearVelocity = Vector3.zero
+
+		if root.Position.Y < -10 then
+			root.CFrame = CFrame.new(root.Position.X, 5, root.Position.Z)
+		end
+
+		if roundCoins >= S.farmGoal then
+			finishRound()
+			return 0.2
+		end
+
+		local _, killerPos = getKiller()
+
+		if S.farmAvoidKiller and killerPos then
+			local distance = (root.Position - killerPos).Magnitude
+
+			if distance < S.farmSafeDistance * 0.6 then
+				setStatus("Avoiding the murderer")
+
+				local away = root.Position - killerPos
+				away = away.Magnitude > 0.1 and away.Unit or Vector3.new(1, 0, 0)
+				moveTo(root.Position + away * 45)
+				return 0.1
+			end
+		end
+
+		if os.clock() - lastScan > 1.2 or #cache == 0 then
+			cache = findCoins()
+			lastScan = os.clock()
+		end
+
+		local positions = otherPositions()
+		local nearest
+		local nearestDistance = math.huge
+		local remaining = 0
+
+		for index = #cache, 1, -1 do
+			local coin = cache[index]
+
+			if not coin.Parent or collected[coin] then
+				table.remove(cache, index)
+			else
+				remaining += 1
+
+				if coinSafe(coin, root.Position, killerPos, positions) then
+					local distance = (root.Position - coin.Position).Magnitude
+
+					if distance < nearestDistance then
+						nearest = coin
+						nearestDistance = distance
+					end
+				end
+			end
+		end
+
+		if nearest then
+			emptySince = nil
+			setStatus(string.format("Farming %d/%d", roundCoins, S.farmGoal))
+
+			if moveTo(nearest.Position + Vector3.new(0, 3, 0)) then
+				collect(nearest)
+			end
+
+			return S.farmDelayMs / 1000
+		end
+
+		if remaining > 0 then
+			setStatus("Waiting for a safe coin")
+			return 0.5
+		end
+
+		setStatus(string.format("Searching for coins (%d/%d)", roundCoins, S.farmGoal))
+
+		if not emptySince then
+			emptySince = os.clock()
+		end
+
+		if os.clock() - emptySince > 4 and os.clock() - lastHop > 6 then
+			lastHop = os.clock()
+
+			local position = containerPosition()
+
+			if position then
+				moveTo(position + Vector3.new(0, 5, 0))
+			end
+
+			lastScan = 0
+		end
+
+		return 1
+	end
+
+	function Farm.step()
+		if not S.coinFarm then
+			if state ~= "off" then
+				Farm.stop()
+			end
+
+			setStatus("Off")
+			return 0.5
+		end
+
+		if state == "off" then
+			startRound()
+		end
+
+		if state == "waiting" then
+			return stepWaiting()
+		end
+
+		local root = getRoot()
+
+		if not root then
+			setStatus("Waiting for your character")
+			return 1
+		end
+
+		return stepFarming(root)
+	end
+
+	function Farm.restart()
+		if S.coinFarm then
+			startRound()
+			setStatus("Round restarted")
+		end
+	end
+
 	function Farm.stop()
+		state = "off"
 		cancelTween()
 		noclip(false)
 		table.clear(cache)
@@ -3249,66 +3781,14 @@ do
 
 	function Farm.loop()
 		while gui.Parent do
-			if S.coinFarm then
-				local root = getRoot()
+			local ok, delay = pcall(Farm.step)
 
-				if root then
-					noclip(true)
-
-					if root.Position.Y < -10 then
-						root.CFrame = CFrame.new(root.Position.X, 5, root.Position.Z)
-					end
-
-					if os.clock() - lastScan > 1.2 then
-						cache = findCoins()
-						lastScan = os.clock()
-					end
-
-					local nearest
-					local nearestDistance = math.huge
-
-					for index = #cache, 1, -1 do
-						local coin = cache[index]
-
-						if not coin.Parent then
-							table.remove(cache, index)
-						else
-							local distance = (root.Position - coin.Position).Magnitude
-
-							if distance < nearestDistance then
-								nearest = coin
-								nearestDistance = distance
-							end
-						end
-					end
-
-					if nearest then
-						if moveTo(nearest.Position + Vector3.new(0, 3, 0)) then
-							collect(nearest)
-						end
-
-						local index = table.find(cache, nearest)
-
-						if index then
-							table.remove(cache, index)
-						end
-
-						task.wait(S.farmDelayMs / 1000)
-					else
-						task.wait(1)
-					end
-				else
-					task.wait(1)
-				end
-			else
-				if next(modified) or #cache > 0 then
-					Farm.stop()
-				end
-
-				task.wait(0.5)
+			if not ok then
+				Log.add("Farm", delay)
+				delay = 1
 			end
 
-			task.wait(0.05)
+			task.wait(delay or 0.1)
 		end
 	end
 
@@ -3473,7 +3953,7 @@ do
 			MM2.onLoaded()
 		end
 
-		Toast.show("MM2 section loaded")
+		Toast.show("MM2 features loaded")
 	end
 
 	function MM2.cleanup()
@@ -3574,28 +4054,13 @@ do
 	local ringAlpha = 0
 	local ringRadius = S.silentFov
 	local ringLock = 0
+	local models = {}
+	local owners = {}
 	local ring
 	local ringStroke
 	local dot
 	local oldIndex
 	local oldNamecall
-
-	local TORSO = { "HumanoidRootPart", "UpperTorso", "Torso" }
-	local BODY = {
-		"Head",
-		"UpperTorso",
-		"Torso",
-		"LowerTorso",
-		"HumanoidRootPart",
-		"LeftUpperArm",
-		"RightUpperArm",
-		"Left Arm",
-		"Right Arm",
-		"LeftUpperLeg",
-		"RightUpperLeg",
-		"Left Leg",
-		"Right Leg",
-	}
 
 	local function isOwnCall()
 		return ownCall or (type(checkcaller) == "function" and checkcaller())
@@ -3631,8 +4096,12 @@ do
 					return current.part
 				end
 
-				local origin = workspace.CurrentCamera.CFrame.Position
-				return Ray.new(origin, (current.position - origin).Unit)
+				local camera = workspace.CurrentCamera
+
+				if camera then
+					local origin = camera.CFrame.Position
+					return Ray.new(origin, (current.position - origin).Unit)
+				end
 			end
 		end
 
@@ -3726,91 +4195,16 @@ do
 			)
 	end
 
-	local function firstPart(model, names)
-		for _, name in ipairs(names) do
-			local part = model:FindFirstChild(name)
-
-			if part and part:IsA("BasePart") then
-				return part
-			end
-		end
-
-		return nil
-	end
-
 	local function choosePart(model, camera, mouse, now)
-		if S.silentPart == "Head" then
-			return firstPart(model, { "Head" }) or firstPart(model, TORSO)
-		elseif S.silentPart == "Torso" then
-			return firstPart(model, TORSO)
-		elseif S.silentPart == "Random" then
-			local pick = randomPick[model]
-
-			if not pick or now - pick.time > 0.6 or not pick.part.Parent then
-				local available = {}
-
-				for _, name in ipairs(BODY) do
-					local part = model:FindFirstChild(name)
-
-					if part and part:IsA("BasePart") then
-						table.insert(available, part)
-					end
-				end
-
-				if #available == 0 then
-					return nil
-				end
-
-				pick = { part = available[math.random(1, #available)], time = now }
-				randomPick[model] = pick
-			end
-
-			return pick.part
+		if S.silentPart == "Random" then
+			return Aim.randomPart(model, randomPick, now)
 		end
 
-		local best
-		local bestDistance
-
-		for _, name in ipairs(BODY) do
-			local part = model:FindFirstChild(name)
-
-			if part and part:IsA("BasePart") then
-				local point = camera:WorldToViewportPoint(part.Position)
-
-				if point.Z > 0 then
-					local distance = (Vector2.new(point.X, point.Y) - mouse).Magnitude
-
-					if not bestDistance or distance < bestDistance then
-						best = part
-						bestDistance = distance
-					end
-				end
-			end
-		end
-
-		return best
+		return Aim.part(model, S.silentPart, camera, mouse)
 	end
 
 	local function evaluate(model, owner, camera, mouse, origin, now, fovLimit)
-		local humanoid = model:FindFirstChildOfClass("Humanoid")
-
-		if not humanoid or humanoid.Health <= 0 then
-			return nil
-		end
-
-		if S.ignoreForcefield and model:FindFirstChildOfClass("ForceField") then
-			return nil
-		end
-
-		if owner then
-			if not S.playersEnabled or Targets.protected(owner) then
-				return nil
-			end
-
-			if S.silentTeam and owner.Team ~= nil and owner.Team == player.Team then
-				return nil
-			end
-		elseif not S.npcsEnabled then
+		if not Targets.eligible(model, owner, "silentTeam", "mm2SilentMurderer") then
 			return nil
 		end
 
@@ -3854,7 +4248,7 @@ do
 			part = part,
 			distance = distance,
 			offset = offset,
-			priority = Targets.isPriority(owner),
+			priority = Targets.isPriority(owner or nil),
 		}
 	end
 
@@ -3870,89 +4264,40 @@ do
 		return a.offset < b.offset
 	end
 
-	function Silent.update(dt, mouse)
-		if not Silent.loaded then
-			return
-		end
-
-		local camera = workspace.CurrentCamera
-		local now = os.clock()
+	local function selectTarget(camera, mouse, now)
+		local origin = camera.CFrame.Position
 		local best
 
-		if S.silentEnabled and camera and not State.panelHover then
-			ownCall = true
-
-			pcall(function()
-				local origin = camera.CFrame.Position
-
-				if S.npcsEnabled and not Targets.npcTracking then
-					Targets.ensureNpcTracking()
-				end
-
-				if S.silentSticky and lastModel and lastModel.Parent then
-					best = evaluate(
-						lastModel,
-						Players:GetPlayerFromCharacter(lastModel),
-						camera,
-						mouse,
-						origin,
-						now,
-						S.silentFov * 1.3
-					)
-				end
-
-				if not best then
-					for _, other in ipairs(Players:GetPlayers()) do
-						if other ~= player and other.Character then
-							local data = evaluate(other.Character, other, camera, mouse, origin, now, S.silentFov)
-
-							if data and better(data, best) then
-								best = data
-							end
-						end
-					end
-
-					if S.npcsEnabled then
-						for model in pairs(Targets.npcModels) do
-							if model ~= player.Character
-								and not Players:GetPlayerFromCharacter(model)
-								and model:IsDescendantOf(workspace) then
-								local data = evaluate(model, nil, camera, mouse, origin, now, S.silentFov)
-
-								if data and better(data, best) then
-									best = data
-								end
-							end
-						end
-					end
-				end
-			end)
-
-			ownCall = false
+		if S.silentSticky and lastModel and lastModel.Parent then
+			best = evaluate(
+				lastModel,
+				Players:GetPlayerFromCharacter(lastModel),
+				camera,
+				mouse,
+				origin,
+				now,
+				S.silentFov * 1.3
+			)
 		end
 
 		if best then
-			lastModel = best.model
+			return best
+		end
 
-			local velocity = best.part.AssemblyLinearVelocity
-			local lead = (S.silentPredict / 100) * (0.12 + best.distance / 1500)
-			best.position = best.part.Position + velocity * lead
+		local count = Targets.collect(models, owners)
 
-			if now - rollTime > 0.25 then
-				rollTime = now
-				rollPass = math.random(1, 100) <= S.silentHit
-			end
+		for index = 1, count do
+			local data = evaluate(models[index], owners[index] or nil, camera, mouse, origin, now, S.silentFov)
 
-			aim = rollPass and best or nil
-		else
-			lastModel = nil
-			aim = nil
-
-			if S.silentPart ~= "Random" and next(randomPick) then
-				table.clear(randomPick)
+			if data and better(data, best) then
+				best = data
 			end
 		end
 
+		return best
+	end
+
+	local function updateRing(dt, mouse, best, camera)
 		local ringGoal = (S.silentEnabled and S.silentShowFov and not State.panelHover) and 1 or 0
 		ringAlpha += (ringGoal - ringAlpha) * (1 - math.exp(-dt * 14))
 		ringRadius += (S.silentFov - ringRadius) * (1 - math.exp(-dt * 22))
@@ -3983,12 +4328,57 @@ do
 				dot.Position = UDim2.fromOffset(point.X, point.Y)
 				dot.BackgroundColor3 = ringColor
 				dot.Visible = true
-			else
-				dot.Visible = false
+				return
 			end
-		else
-			dot.Visible = false
 		end
+
+		dot.Visible = false
+	end
+
+	function Silent.update(dt, mouse)
+		if not Silent.loaded then
+			return
+		end
+
+		local camera = workspace.CurrentCamera
+		local now = os.clock()
+		local best
+
+		if S.silentEnabled and camera and not State.panelHover then
+			ownCall = true
+
+			local ok, result = pcall(selectTarget, camera, mouse, now)
+
+			ownCall = false
+
+			if ok then
+				best = result
+			end
+		end
+
+		if best then
+			lastModel = best.model
+
+			local velocity = best.part.AssemblyLinearVelocity
+			local lead = (S.silentPredict / 100) * (0.12 + best.distance / 1500)
+			best.position = best.part.Position + velocity * lead
+
+			if now - rollTime > 0.25 then
+				rollTime = now
+				rollPass = math.random(1, 100) <= S.silentHit
+			end
+
+			aim = rollPass and best or nil
+		else
+			lastModel = nil
+			aim = nil
+
+			if S.silentPart ~= "Random" and next(randomPick) then
+				table.clear(randomPick)
+			end
+		end
+
+		updateRing(dt, mouse, best, camera)
 	end
 
 	function Silent.enable()
@@ -4587,6 +4977,20 @@ function UI.select(name)
 	end
 end
 
+local TAB_ORDER = {
+	["Trigger"] = 10,
+	["Aim Assist"] = 20,
+	["Silent Aim"] = 25,
+	["ESP"] = 30,
+	["Visuals"] = 40,
+	["Players"] = 50,
+	["MM2"] = 60,
+	["Utility"] = 70,
+	["Interface"] = 80,
+	["Profiles"] = 90,
+	["Logs"] = 100,
+}
+
 function UI.page(name)
 	local page = new("Frame", {
 		Name = name,
@@ -4605,7 +5009,7 @@ function UI.page(name)
 		Text = "",
 		AutoButtonColor = false,
 		BorderSizePixel = 0,
-		LayoutOrder = nextOrder(),
+		LayoutOrder = TAB_ORDER[name] or nextOrder(),
 	}, Window.tabScroll)
 	corner(button, 4)
 
@@ -4716,7 +5120,8 @@ function UI.set(key, value)
 end
 
 function UI.header(col, text)
-	local label = makeLabel(col, text, UDim2.new(1, 0, 0, 14), UDim2.new(), 10, colors.muted, true)
+	local label = makeLabel(col, text, UDim2.new(1, 0, 0, 22), UDim2.new(), 10, colors.muted, true)
+	label.TextYAlignment = Enum.TextYAlignment.Bottom
 	label.LayoutOrder = nextOrder()
 	register(label, text, col)
 	return label
@@ -5398,8 +5803,10 @@ do
 		end
 	end)
 
-	askConfirm = function(title, message, yes, no)
+	askConfirm = function(title, message, yes, no, timeout)
 		closeId += 1
+		local id = closeId
+
 		titleLabel.Text = title
 		messageLabel.Text = message
 		onYes = yes
@@ -5407,6 +5814,18 @@ do
 		overlay.Visible = true
 		tween(overlay, 0.18, { BackgroundTransparency = 0.45 })
 		tween(cardScale, 0.2, { Scale = 1 })
+
+		if timeout then
+			task.delay(timeout, function()
+				if closeId == id and overlay.Visible then
+					close()
+
+					if onNo then
+						onNo()
+					end
+				end
+			end)
+		end
 	end
 end
 local function opts(key)
@@ -5422,33 +5841,35 @@ end
 local triggerLeft, triggerRight = UI.page("Trigger")
 UI.header(triggerLeft, "TRIGGER")
 UI.toggle(triggerLeft, "Auto Trigger", "autoEnabled", announce("Auto Trigger"))
-UI.toggle(triggerLeft, "Players", "playersEnabled")
-UI.toggle(triggerLeft, "NPCs", "npcsEnabled")
-UI.toggle(triggerLeft, "Ignore Forcefield", "ignoreForcefield")
 UI.choice(triggerLeft, "Trigger Mode", "triggerMode", opts("triggerMode"))
 UI.choice(triggerLeft, "Fire Mode", "fireMode", opts("fireMode"))
 UI.choice(triggerLeft, "Hit Part", "triggerPart", opts("triggerPart"))
 UI.choice(triggerLeft, "Priority", "triggerPriority", PRIORITIES)
+UI.header(triggerLeft, "TARGETS")
+UI.toggle(triggerLeft, "Players", "playersEnabled")
+UI.toggle(triggerLeft, "NPCs", "npcsEnabled")
+UI.toggle(triggerLeft, "Ignore Forcefield", "ignoreForcefield")
 UI.input(triggerLeft, "Tool Filter", "toolFilter")
 UI.header(triggerRight, "TUNING")
 UI.slider(triggerRight, "Mouse FOV", "fovRadius", 12, 140, " px", function()
 	Trigger.rebuild()
 end)
 UI.slider(triggerRight, "Max Range", "maxRange", 50, 500, " studs")
-UI.slider(triggerRight, "Fire Delay", "fireDelayMs", 80, 500, " ms")
+UI.slider(triggerRight, "Fire Delay", "fireDelayMs", 0, 500, " ms")
 UI.slider(triggerRight, "Burst Size", "burstSize", 2, 8, "")
 
 local assistLeft, assistRight = UI.page("Aim Assist")
 UI.header(assistLeft, "AIM ASSIST")
 UI.toggle(assistLeft, "Aim Assist", "assistEnabled", announce("Aim Assist"))
+UI.choice(assistLeft, "Mode", "assistMode", opts("assistMode"))
+UI.choice(assistLeft, "Aim Part", "assistPart", opts("assistPart"))
+UI.choice(assistLeft, "Priority", "assistPriority", PRIORITIES)
+UI.choice(assistLeft, "Curve", "assistCurve", opts("assistCurve"))
+UI.header(assistLeft, "CHECKS")
 UI.toggle(assistLeft, "Show FOV", "assistShowFov")
 UI.toggle(assistLeft, "Wall Check", "assistWall")
 UI.toggle(assistLeft, "Team Check", "assistTeam")
 UI.toggle(assistLeft, "Dynamic FOV", "assistDynamic")
-UI.choice(assistLeft, "Aim Part", "assistPart", opts("assistPart"))
-UI.choice(assistLeft, "Mode", "assistMode", opts("assistMode"))
-UI.choice(assistLeft, "Curve", "assistCurve", opts("assistCurve"))
-UI.choice(assistLeft, "Priority", "assistPriority", PRIORITIES)
 
 local overdriveAsking = false
 local overdrivePending = 0
@@ -5489,6 +5910,7 @@ UI.slider(assistRight, "FOV", "assistFov", 10, 300, " px")
 UI.slider(assistRight, "Strength", "assistStrength", 1, 100, " %")
 UI.slider(assistRight, "Range", "assistRange", 50, 500, " studs")
 UI.slider(assistRight, "Deadzone", "assistDeadzone", 0, 30, " px")
+UI.header(assistRight, "ADVANCED")
 UI.slider(assistRight, "Lead", "assistLead", 0, 100, " %")
 UI.slider(assistRight, "Bullet Speed", "assistBulletSpeed", 100, 3000, " st/s")
 UI.slider(assistRight, "Sticky Time", "assistStickyMs", 0, 2000, " ms")
@@ -5501,29 +5923,31 @@ UI.toggle(espLeft, "Enabled", "espEnabled")
 UI.toggle(espLeft, "Boxes", "espBoxes")
 UI.choice(espLeft, "Box Style", "espBoxStyle", opts("espBoxStyle"))
 UI.toggle(espLeft, "Names", "espNames")
+UI.toggle(espLeft, "Distance", "espDistance")
 UI.toggle(espLeft, "Health", "espHealth")
 UI.toggle(espLeft, "Health Text", "espHealthText")
-UI.toggle(espLeft, "Distance", "espDistance")
 UI.toggle(espLeft, "Tool Names", "espTools")
+UI.header(espLeft, "EXTRAS")
 UI.toggle(espLeft, "Head Dots", "espHeadDots")
 UI.toggle(espLeft, "Off-screen Arrows", "espArrows")
 UI.toggle(espLeft, "Skeletons", "espSkeleton", nil, "Skeleton")
 UI.toggle(espLeft, "Chams", "espChams")
 UI.toggle(espLeft, "Tracers", "espTracers")
 UI.choice(espLeft, "Tracer Origin", "espTracerOrigin", opts("espTracerOrigin"))
-UI.toggle(espLeft, "Team Colors", "espTeamColors")
-UI.toggle(espLeft, "Distance Fade", "espFade")
-UI.toggle(espLeft, "NPCs", "espNpcs", function(value)
-	if value then
-		Targets.ensureNpcTracking()
-	end
-end)
-UI.toggle(espLeft, "Loot ESP", "lootEsp")
 UI.header(espRight, "TUNING")
 UI.slider(espRight, "Range", "espRange", 100, 2000, " studs")
 UI.slider(espRight, "Max Players", "espMaxPlayers", 1, 50, "")
 UI.slider(espRight, "Chams Fill", "chamsFill", 0, 100, " %")
 UI.slider(espRight, "Chams Outline", "chamsOutline", 0, 100, " %")
+UI.header(espRight, "STYLE")
+UI.toggle(espRight, "Team Colors", "espTeamColors")
+UI.toggle(espRight, "Distance Fade", "espFade")
+UI.toggle(espRight, "NPCs", "espNpcs", function(value)
+	if value then
+		Targets.ensureNpcTracking()
+	end
+end)
+UI.toggle(espRight, "Loot ESP", "lootEsp")
 UI.color(espRight, "ESP COLOR", "espColor", true)
 UI.header(espRight, "RADAR")
 UI.toggle(espRight, "Radar", "radar")
@@ -5536,12 +5960,12 @@ UI.toggle(visualLeft, "Tracer", "tracerEnabled")
 UI.toggle(visualLeft, "Sight", "sightEnabled")
 UI.choice(visualLeft, "Crosshair Style", "sightStyle", opts("sightStyle"))
 UI.toggle(visualLeft, "Skeleton", "skeletonEnabled")
+UI.header(visualLeft, "FEEDBACK")
 UI.toggle(visualLeft, "Hit Markers", "hitMarker")
-UI.input(visualLeft, "Hit Sound ID", "hitSoundId")
 UI.toggle(visualLeft, "Damage Numbers", "damageNumbers")
+UI.input(visualLeft, "Hit Sound ID", "hitSoundId")
 UI.header(visualLeft, "WORLD")
 UI.toggle(visualLeft, "Camera FOV", "cameraFovOn")
-UI.slider(visualLeft, "FOV Value", "cameraFov", 30, 120, "")
 UI.toggle(visualLeft, "Fullbright", "fullbright", function()
 	Util.syncFullbright()
 end)
@@ -5549,6 +5973,7 @@ UI.header(visualRight, "TUNING")
 UI.slider(visualRight, "Sight Size", "sightSize", 4, 40, " px")
 UI.slider(visualRight, "Sight Gap", "sightGap", 0, 20, " px")
 UI.slider(visualRight, "Skeleton Thickness", "skeletonThickness", 1, 5, " px")
+UI.slider(visualRight, "FOV Value", "cameraFov", 30, 120, "")
 UI.header(visualRight, "COLORS")
 UI.color(visualRight, "FOV COLOR", "fovColor", false)
 UI.color(visualRight, "LOCK COLOR", "lockColor", false)
@@ -5704,6 +6129,105 @@ end)
 
 Targets.onUpdate = queueListRefresh
 
+local mm2Left, mm2Right = UI.page("MM2")
+UI.header(mm2Left, "ROLES")
+UI.button(mm2Left, "Load MM2 Features", function()
+	if State.mm2Loaded then
+		Toast.show("MM2 features are already loaded")
+	else
+		MM2.load()
+	end
+end)
+local setMurderer = UI.info(mm2Left, "Murderer")
+local setSheriff = UI.info(mm2Left, "Sheriff")
+UI.button(mm2Left, "Notify Roles", function()
+	MM2.notify()
+end)
+UI.header(mm2Left, "ESP")
+UI.toggle(mm2Left, "Role Colors", "mm2Colors")
+UI.toggle(mm2Left, "Gun Drop ESP", "mm2Gun", function()
+	MM2.updateGun()
+end)
+UI.header(mm2Left, "TARGETING")
+UI.toggle(mm2Left, "Trigger Murderer Only", "mm2TriggerMurderer", function(value)
+	if value and not State.mm2Loaded then
+		MM2.load()
+	end
+end)
+UI.toggle(mm2Left, "Assist Murderer Only", "mm2AssistMurderer", function(value)
+	if value and not State.mm2Loaded then
+		MM2.load()
+	end
+end)
+UI.toggle(mm2Left, "Silent Murderer Only", "mm2SilentMurderer", function(value)
+	if value and not State.mm2Loaded then
+		MM2.load()
+	end
+end)
+UI.header(mm2Right, "COIN FARM")
+UI.toggle(mm2Right, "Auto Farm Coins", "coinFarm", announce("Coin farm"))
+local setFarmStatus = UI.info(mm2Right, "Status")
+Farm.onStatus = function(text)
+	setFarmStatus(text, colors.white)
+end
+UI.slider(mm2Right, "Coin Goal", "farmGoal", 1, 100, "")
+UI.toggle(mm2Right, "Reset When Done", "farmResetDone")
+UI.button(mm2Right, "Restart Round Counter", function()
+	Farm.restart()
+end)
+UI.slider(mm2Right, "Fly Speed", "farmSpeed", 10, 120, " st/s")
+UI.slider(mm2Right, "Collect Delay", "farmDelayMs", 0, 2000, " ms")
+UI.input(mm2Right, "Coin Names", "farmNames")
+UI.header(mm2Right, "SAFETY")
+UI.toggle(mm2Right, "Avoid Murderer", "farmAvoidKiller")
+UI.slider(mm2Right, "Safe Distance", "farmSafeDistance", 20, 200, " studs")
+UI.toggle(mm2Right, "Avoid Line Of Sight", "farmAvoidSight")
+UI.toggle(mm2Right, "Avoid All Players", "farmAvoidPlayers")
+UI.header(mm2Right, "COLORS")
+UI.color(mm2Right, "MURDERER COLOR", "mm2MurdererColor", false)
+UI.color(mm2Right, "SHERIFF COLOR", "mm2SheriffColor", false)
+UI.color(mm2Right, "INNOCENT COLOR", "mm2InnocentColor", false)
+UI.color(mm2Right, "GUN DROP COLOR", "mm2GunColor", false, function()
+	MM2.updateGun()
+end)
+
+MM2.onChange = function()
+	local murderer = Roles.murderer
+	local sheriff = Roles.sheriff
+
+	setMurderer(murderer and murderer.Name or "None", murderer and S.mm2MurdererColor or colors.muted)
+	setSheriff(sheriff and sheriff.Name or "None", sheriff and S.mm2SheriffColor or colors.muted)
+end
+
+local function buildSilentPage()
+	local silentLeft, silentRight = UI.page("Silent Aim")
+	UI.header(silentLeft, "SILENT AIM")
+
+	if not Silent.supported then
+		UI.note(
+			silentLeft,
+			"Silent aim needs an executor with metatable access (hookmetamethod or getrawmetatable). The controls stay inactive without it.",
+			78
+		)
+	end
+
+	UI.toggle(silentLeft, "Silent Aim", "silentEnabled", announce("Silent aim"))
+	UI.choice(silentLeft, "Aim Part", "silentPart", opts("silentPart"))
+	UI.header(silentLeft, "CHECKS")
+	UI.toggle(silentLeft, "Show FOV", "silentShowFov")
+	UI.toggle(silentLeft, "Wall Check", "silentWall")
+	UI.toggle(silentLeft, "Team Check", "silentTeam")
+	UI.toggle(silentLeft, "Sticky Target", "silentSticky")
+	UI.header(silentRight, "TUNING")
+	UI.slider(silentRight, "FOV", "silentFov", 10, 400, " px")
+	UI.slider(silentRight, "Hit Chance", "silentHit", 1, 100, " %")
+	UI.slider(silentRight, "Prediction", "silentPredict", 0, 100, " %")
+	UI.slider(silentRight, "Range", "silentRange", 50, 1000, " studs")
+	UI.color(silentRight, "SILENT FOV COLOR", "silentColor", false)
+end
+
+Silent.onLoaded = buildSilentPage
+
 local utilityLeft, utilityRight = UI.page("Utility")
 UI.header(utilityLeft, "MOVEMENT")
 UI.toggle(utilityLeft, "Speed", "speedOn", function(value)
@@ -5720,18 +6244,7 @@ UI.toggle(utilityLeft, "Anti-AFK", "antiAfk", function()
 	Util.syncAfk()
 end)
 UI.toggle(utilityLeft, "Performance Mode", "perfMode")
-UI.header(utilityRight, "SCRIPT")
-UI.button(utilityRight, "Unload Script", function()
-	gui:Destroy()
-end)
-UI.note(utilityRight, "Unloading removes every overlay, restores speed, camera and lighting, and saves your settings.", 62)
-UI.button(utilityRight, "Load MM2 Section", function()
-	if State.mm2Loaded then
-		Toast.show("MM2 section is already loaded")
-	else
-		MM2.load()
-	end
-end)
+UI.header(utilityRight, "MODULES")
 UI.button(utilityRight, "Load Silent Aim", function()
 	if Silent.loaded then
 		Toast.show("Silent aim is already loaded")
@@ -5739,34 +6252,18 @@ UI.button(utilityRight, "Load Silent Aim", function()
 		Silent.enable()
 	end
 end)
-
-local function buildSilentPage()
-	local silentLeft, silentRight = UI.page("Silent Aim")
-	UI.header(silentLeft, "SILENT AIM")
-
-	if not Silent.supported then
-		UI.note(
-			silentLeft,
-			"Silent aim needs an executor with metatable access (hookmetamethod or getrawmetatable). The controls stay inactive without it.",
-			78
-		)
+UI.button(utilityRight, "Load MM2 Features", function()
+	if State.mm2Loaded then
+		Toast.show("MM2 features are already loaded")
+	else
+		MM2.load()
 	end
-
-	UI.toggle(silentLeft, "Silent Aim", "silentEnabled", announce("Silent aim"))
-	UI.toggle(silentLeft, "Show FOV", "silentShowFov")
-	UI.toggle(silentLeft, "Wall Check", "silentWall")
-	UI.toggle(silentLeft, "Team Check", "silentTeam")
-	UI.toggle(silentLeft, "Sticky Target", "silentSticky")
-	UI.choice(silentLeft, "Aim Part", "silentPart", opts("silentPart"))
-	UI.header(silentRight, "TUNING")
-	UI.slider(silentRight, "FOV", "silentFov", 10, 400, " px")
-	UI.slider(silentRight, "Hit Chance", "silentHit", 1, 100, " %")
-	UI.slider(silentRight, "Prediction", "silentPredict", 0, 100, " %")
-	UI.slider(silentRight, "Range", "silentRange", 50, 1000, " studs")
-	UI.color(silentRight, "SILENT FOV COLOR", "silentColor", false)
-end
-
-Silent.onLoaded = buildSilentPage
+end)
+UI.header(utilityRight, "SCRIPT")
+UI.button(utilityRight, "Unload Script", function()
+	gui:Destroy()
+end)
+UI.note(utilityRight, "Unloading removes every overlay, restores speed, camera and lighting, and saves your settings.", 62)
 
 local interfaceLeft, interfaceRight = UI.page("Interface")
 UI.header(interfaceLeft, "WINDOW")
@@ -5788,10 +6285,10 @@ UI.header(interfaceRight, "KEY BINDS")
 UI.bind(interfaceRight, "Panel", "bindPanel")
 UI.bind(interfaceRight, "Auto Trigger", "bindTrigger")
 UI.bind(interfaceRight, "Aim Assist", "bindAssist")
+UI.bind(interfaceRight, "Silent Aim", "bindSilent")
 UI.bind(interfaceRight, "ESP", "bindEsp")
 UI.bind(interfaceRight, "Hold Key", "bindHold")
 UI.bind(interfaceRight, "Switch Target", "bindSwitch")
-UI.bind(interfaceRight, "Silent Aim", "bindSilent")
 UI.note(interfaceRight, "Click a bind then press a key. Escape clears it. The hold key is used by the Hold Key modes.", 62)
 
 local profilesLeft, profilesRight = UI.page("Profiles")
@@ -5947,43 +6444,6 @@ UI.button(profilesRight, "Check For Updates", function()
 	end)
 end)
 
-local mm2Left, mm2Right = UI.page("MM2")
-UI.header(mm2Left, "ROLES")
-local setMurderer = UI.info(mm2Left, "Murderer")
-local setSheriff = UI.info(mm2Left, "Sheriff")
-UI.button(mm2Left, "Notify Roles", function()
-	MM2.notify()
-end)
-UI.toggle(mm2Left, "Role Colors", "mm2Colors")
-UI.toggle(mm2Left, "Gun Drop ESP", "mm2Gun", function()
-	MM2.updateGun()
-end)
-UI.header(mm2Left, "COIN FARM")
-UI.toggle(mm2Left, "Auto Farm Coins", "coinFarm", announce("Coin farm"))
-UI.slider(mm2Left, "Fly Speed", "farmSpeed", 10, 120, " st/s")
-UI.slider(mm2Left, "Collect Delay", "farmDelayMs", 50, 2000, " ms")
-UI.input(mm2Left, "Coin Names", "farmNames")
-UI.header(mm2Right, "COLORS")
-UI.color(mm2Right, "MURDERER COLOR", "mm2MurdererColor", false)
-UI.color(mm2Right, "SHERIFF COLOR", "mm2SheriffColor", false)
-UI.color(mm2Right, "INNOCENT COLOR", "mm2InnocentColor", false)
-UI.color(mm2Right, "GUN DROP COLOR", "mm2GunColor", false, function()
-	MM2.updateGun()
-end)
-
-MM2.onLoaded = function()
-	UI.setTabVisible("MM2", true)
-	UI.select("MM2")
-end
-
-MM2.onChange = function()
-	local murderer = Roles.murderer
-	local sheriff = Roles.sheriff
-
-	setMurderer(murderer and murderer.Name or "None", murderer and S.mm2MurdererColor or colors.muted)
-	setSheriff(sheriff and sheriff.Name or "None", sheriff and S.mm2SheriffColor or colors.muted)
-end
-
 local logLeft = UI.page("Logs")
 UI.header(logLeft, "ERROR LOG")
 
@@ -6092,9 +6552,6 @@ table.insert(Config.hooks, function()
 	Window.applyLook()
 end)
 table.insert(Config.hooks, function()
-	UI.setTabVisible("MM2", mm2Active())
-end)
-table.insert(Config.hooks, function()
 	refreshPlayerList()
 end)
 
@@ -6167,6 +6624,7 @@ RunService:BindToRenderStep("PawOverlay", Enum.RenderPriority.Camera.Value + 1, 
 	local mouse = UserInputService:GetMouseLocation()
 	State.panelHover = Window.mouseOver()
 
+	safe("Trigger", Trigger.tick, dt)
 	safe("Overlay", Overlay.update, dt, mouse)
 	safe("ESP", ESP.update, dt, mouse)
 	safe("Loot", Loot.update)
@@ -6178,7 +6636,6 @@ RunService:BindToRenderStep("PawOverlay", Enum.RenderPriority.Camera.Value + 1, 
 end)
 
 connect(RunService.Heartbeat, function(dt)
-	safe("Trigger", Trigger.tick, dt)
 	safe("Fx", Fx.tick, dt)
 	safe("Util", Util.tick)
 	safe("MM2", MM2.tick, dt)
@@ -6209,7 +6666,6 @@ end)
 
 Util.syncAll()
 refreshPlayerList()
-UI.setTabVisible("MM2", mm2Active())
 UI.select("Trigger")
 Window.show()
 
@@ -6217,14 +6673,15 @@ local function askMM2()
 	local detected = game.PlaceId == 142823291 or game.PlaceId == 335132309 or game.PlaceId == 636649648
 
 	askConfirm(
-		detected and "Murder Mystery 2 detected" or "Load the MM2 section?",
-		"Load the MM2 section with role detection, role colors, gun drop ESP and the coin collector?",
+		detected and "Murder Mystery 2 detected" or "Load the MM2 features?",
+		"Load MM2 role detection, role colors and gun drop ESP? The coin collector is always in the MM2 tab.",
 		function()
 			MM2.load()
 		end,
 		function()
-			Toast.show("MM2 section not loaded")
-		end
+			Toast.show("MM2 features not loaded")
+		end,
+		90
 	)
 end
 
@@ -6238,5 +6695,6 @@ askConfirm(
 	function()
 		Toast.show("Silent aim not loaded")
 		askMM2()
-	end
+	end,
+	90
 )
